@@ -41,6 +41,11 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
       - name: Add ARMv7 ioctl header
         run: |
+                - name: Add ARMv7 ioctl header
+        run: |
+          mkdir -p /usr/include/asm
+          printf '#include <asm-generic/ioctl.h>\n' > /usr/include/asm/ioctl.h
+
           mkdir -p "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/arm-linux-androideabi/asm"
           printf '#include <asm-generic/ioctl.h>\n' > "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/arm-linux-androideabi/asm/ioctl.h"
       - name: Install native build dependencies
