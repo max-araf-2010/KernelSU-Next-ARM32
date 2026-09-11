@@ -65,7 +65,7 @@ jobs:
 
           echo "$RUNNER_TEMP/android-arm32-bin" >> "$GITHUB_PATH"
           echo "$TOOLCHAIN" >> "$GITHUB_PATH"
-
+          export PATH="$RUNNER_TEMP/android-arm32-bin:$TOOLCHAIN:$PATH"
           echo "===== ARM32 tools ====="
           command -v arm-linux-androideabi-ar
           command -v arm-linux-androideabi-ranlib
