@@ -1,4 +1,4 @@
-name: KernelSU Next ARM32 Manager
+name: ReFix KernelSU Next ARM32 Manager
 
 on:
   workflow_dispatch:
