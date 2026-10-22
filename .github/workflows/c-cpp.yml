@@ -1,0 +1,178 @@
+name: Build GrassKernel with KernelSU & SuSFS for Galaxy M21 (OneUI 6.1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 'Target Device'
+        required: true
+        default: 'm21'
+        type: choice
+        options:
+          - m21
+          - a51
+          - m31
+          - m31s
+          - f41
+      rom_type:
+        description: 'ROM Type (OneUI for DisturbedUI / Port ROMs)'
+        required: true
+        default: 'oneui'
+        type: choice
+        options:
+          - oneui
+          - aosp
+      enable_susfs:
+        description: 'Integrate SuSFS (v2.3.0 / 4.14 patches)'
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    name: Build Kernel with Clang & AnyKernel3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git make bc bison flex libssl-dev libelf-dev \
+            pkg-config libncurses-dev ccache zip unzip curl \
+            tar wget xz-utils libtool automake autoconf python3
+
+      - name: Clone GrassKernel Source
+        run: |
+          git clone --depth=1 -b Grass-Unified2 https://github.com/ghazzor/grass_kernel.git kernel_source
+          cd kernel_source
+          echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
+
+      - name: Setup Neutron Clang Toolchain (Bleeding-Edge)
+        run: |
+          mkdir -p $HOME/toolchain/neutron
+          cd $HOME/toolchain/neutron
+          # Download AntMan (Neutron Toolchain Manager)
+          curl -sLO https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman
+          chmod +x antman
+          # Sync latest Neutron Clang LLVM toolchain
+          ./antman -S
+          ./antman --patch=glibc
+          echo "$HOME/toolchain/neutron/bin" >> $GITHUB_PATH
+          echo "CC=clang" >> $GITHUB_ENV
+
+      - name: Setup KernelSU & SuSFS Patches
+        run: |
+          cd $KERNEL_DIR
+
+          # 1. Update / Integrate KernelSU
+          echo "[*] Integrating KernelSU..."
+          if [ -d "KernelSU" ]; then
+            rm -rf KernelSU
+          fi
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+
+          # 2. Integrate SuSFS for Linux 4.14
+          if [ "${{ github.event.inputs.enable_susfs }}" = "true" ]; then
+            echo "[*] Cloning SuSFS 4.14 patches..."
+            git clone --depth=1 -b kernel-4.14 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || \
+            git clone --depth=1 https://github.com/Star-Seven/susfs4ksu.git /tmp/susfs4ksu
+
+            echo "[*] Copying SuSFS source files..."
+            cp -r /tmp/susfs4ksu/kernel_patches/fs/* fs/
+            cp -r /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+            echo "[*] Applying SuSFS patch to KernelSU..."
+            if [ -d "drivers/kernelsu" ]; then
+              cd drivers/kernelsu
+              patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+              cd $KERNEL_DIR
+            elif [ -d "KernelSU" ]; then
+              cd KernelSU
+              patch -p1 --forward < /tmp/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
+              cd $KERNEL_DIR
+            fi
+
+            # Enable SuSFS configs in defconfig
+            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/grass.config
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/grass.config
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/vendor/grass.config
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSUMV=y" >> arch/arm64/configs/vendor/grass.config
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> arch/arm64/configs/vendor/grass.config
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> arch/arm64/configs/vendor/grass.config
+            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> arch/arm64/configs/vendor/grass.config
+          fi
+
+      - name: Build Kernel Image & AnyKernel3 Zip
+        run: |
+          cd $KERNEL_DIR
+
+          # Set build parameters matching the user's M21 OneUI 6.1 Disturbed ROM
+          export DEVICE="${{ github.event.inputs.device }}"
+          export ROM="${{ github.event.inputs.rom_type }}"
+          export KSU=1
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/toolchain/neutron/bin:$PATH"
+
+          # Verify Clang version
+          clang --version
+
+          # Execute GrassKernel build script
+          chmod +x build_kernel.sh
+          ./build_kernel.sh
+
+      - name: Package AnyKernel3 Flashable Zip
+        id: package
+        run: |
+          cd $KERNEL_DIR
+
+          # Locate generated flashable zip or AnyKernel3 package
+          ZIP_NAME=$(find kernel_zip -name "*.zip" | head -n 1)
+          if [ -z "$ZIP_NAME" ]; then
+            echo "[*] Packaging with AnyKernel3 manually..."
+            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /tmp/AnyKernel3
+            cp out/arch/arm64/boot/Image /tmp/AnyKernel3/Image
+            sed -i 's/device.name1=.*/device.name1=m21nsxx/g' /tmp/AnyKernel3/anykernel.sh
+            sed -i 's/device.name2=.*/device.name2=m21/g' /tmp/AnyKernel3/anykernel.sh
+            sed -i 's/device.name3=.*/device.name3=SM-M215F/g' /tmp/AnyKernel3/anykernel.sh
+            sed -i 's/device.name4=.*/device.name4=SM-M215G/g' /tmp/AnyKernel3/anykernel.sh
+            cd /tmp/AnyKernel3
+            zip -r9 $KERNEL_DIR/GrassKernel-M21-KSU-SUSFS-OneUI.zip * -x .git README.md
+            ZIP_NAME="$KERNEL_DIR/GrassKernel-M21-KSU-SUSFS-OneUI.zip"
+          fi
+
+          echo "FLASHABLE_ZIP=$ZIP_NAME" >> $GITHUB_ENV
+          echo "FLASHABLE_BASENAME=$(basename $ZIP_NAME)" >> $GITHUB_ENV
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FLASHABLE_BASENAME }}
+          path: ${{ env.FLASHABLE_ZIP }}
+          retention-days: 7
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: release-${{ github.run_number }}
+          name: GrassKernel Galaxy M21 (KSU + SuSFS) OneUI 6.1
+          body: |
+            ### GrassKernel Custom Build for Samsung Galaxy M21 (SM-M215F / SM-M215G)
+            - **Target ROM:** OneUI 6.1 (Android 14 DisturbedUI / Ports)
+            - **Base Kernel:** Linux 4.14.246 (Exynos 9611)
+            - **Compiler:** Latest Neutron Clang (LLVM LTO Optimized)
+            - **Root:** KernelSU + SuSFS 4.14 Integrated
+            - **Format:** TWRP / OrangeFox Flashable AnyKernel3 Zip
+          files: ${{ env.FLASHABLE_ZIP }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
